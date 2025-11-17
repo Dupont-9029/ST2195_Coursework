@@ -1,0 +1,183 @@
+---
+title: "ST2195proj part1"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-02-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+#set the working directory to where you intend to have your file set
+#setwd('C:/Users/Admin/Documents/Programming for Data Science/Coursework')
+#getwd()
+```
+
+
+
+```{r}
+target <- function(x) {
+  return (0.5*exp(-abs(x)))
+}
+```
+
+
+
+```{r}
+###We need to create a vector to store the values and assign the first element to x0 while preventing starting value from becoming 0
+random_walk_metropolis <- function(x0,N,s) {
+  samspc<- numeric(N)
+  samspc[1] <- x0
+  for (i in 2:N) {
+    x_star<- rnorm(1,mean= samspc[i-1], sd= s)
+    ratio <- target(x_star) / target(samspc[i-1])
+    u <- runif(1,min=0, max=1)
+    
+    if (log(u) < log(ratio)) {
+      samspc[i]= x_star
+    } else {
+      samspc[i]<- samspc[i-1]
+    }
+  }
+  
+  return(samspc)
+}
+```
+
+```{r}
+set.seed(444)
+sample<- random_walk_metropolis(2,10000,1)
+head(sample)
+class(sample)
+df<- data.frame(sample)
+x_vals<-seq(-10,10,length.out=1000)
+y_vals<-target(x_vals)
+fx_df<- tibble(x_vals,y_vals)
+```
+
+
+
+```{r}
+print(paste("The Monte Carlo Estimate of Mean: ", mean(sample)))
+print(paste("The Monte Carlo Estimate of Standard Deviation: ", sd(sample)))
+```
+
+
+```{r}
+#png(file='Metropolis-Hasting Sampling.png')
+
+hist(sample,probability=TRUE, breaks=100,col="purple",
+     main="Metropolis-Hastings Sampling", 
+     xlab="X Values", ylab="Density",
+     xlim=c(-10,10),ylim=c(0,0.5))
+
+lines(density(sample),col="yellow",lwd=3)
+
+lines(fx_df,col="red",lwd=3)
+
+legend("right",legend=c("Histogram","KDE","True f(x)"),fill=c("purple","yellow","red"))
+
+#dev.off()
+```
+
+
+```{r}
+MarkovChains<- function(N,J) {
+  #create a grid of s values
+  s_vals<- pretty(c(0.001, 1), n = 2000)
+  #create random numbers based on J
+  j_vals <- runif(J,max=40,min=-40)
+  #create a numeric vector to store r hat values
+  rhat_vals <- numeric(length(s_vals))
+  latest_rhat <- 0
+  #create a matrix to store the multiple chains values for faster computation in loops
+  for (s in seq_along(s_vals)){
+    chains_matrix <- matrix(NA, nrow=N,ncol=J)
+    for (j in seq_len(J)) {
+      chains_matrix[,j] <-
+        random_walk_metropolis(j_vals[j],N,s_vals[s])
+    }
+    #applying mean and variance to the columns of matrix after all chains for given s values are generated
+    M_j<-colMeans(chains_matrix)
+    V_j<-apply(chains_matrix,2,var)
+    #follow the rest of the steps given
+    W<- mean(V_j)
+    M<- mean(M_j)
+    B<- sum((M_j-M)^2)/J
+    R_hat<- sqrt((B+W)/W)
+    # need to store a number of r hat values as a result of a grid of s values and need to store the latest r hat value as the final value generated
+    rhat_vals[s]<- R_hat
+    result_mat <- cbind(s_vals=s_vals,rhat_vals=rhat_vals)
+    latest_rhat <- R_hat
+  }
+  return (list(result_mat=result_mat,latest_rhat=latest_rhat))
+}
+```
+
+
+```{r}
+result<- MarkovChains(N=2000, J=4)
+data<- as_tibble(result$result_mat)
+```
+
+
+```{r}
+#need to run data with s=0.001
+head(data)
+```
+
+
+```{r}
+p1<- ggplot(data, aes(x=s_vals,y=rhat_vals))+
+  geom_line(aes(color= "R values"))+
+  geom_hline(yintercept = 1.05, color="red", linetype="dashed")+
+  labs(x = "Standard Deviation (s)", y = "R_hat", title = "Convergence Diagnosis") +
+  ylim(0, 2)+
+  scale_color_manual(values = "blue")
+p1
+#ggsave("Convergence Diagnosis.png", plot=p1)
+```
+
+
+```{r}
+cat("Final R hat value:", result$latest_rhat,"\n")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

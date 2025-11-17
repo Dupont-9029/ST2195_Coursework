@@ -1,0 +1,659 @@
+---
+title: "ST2195proj part 2"
+output: html_document
+date: "2025-02-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+library(DBI)
+#set the working directory to where you intend to have your file set
+#setwd('C:/Users/Admin/Documents/Programming for Data Science/Coursework')
+#getwd()
+
+```
+
+
+```{r}
+
+conn <- dbConnect(RSQLite::SQLite(), "airline.db")
+# Load in the data from the csv files
+#Note that if you already have a database prepared please use that instead and load them in
+airports <- read.csv("airports.csv", header = TRUE)
+carriers <- read.csv("carriers.csv", header = TRUE)
+planes <- read.csv("plane-data.csv", header = TRUE)
+dbWriteTable(conn, "airports", airports)
+dbWriteTable(conn, "carriers", carriers)
+dbWriteTable(conn, "planes", planes)
+
+# Create a loop to load 2001-2005 ontime data files directly from compressed bz2 format
+# Alternatively, you could use a utility to extract the csv files from bz2 format first then load. Possible utility tools: Peazip, 7Zip, etc.
+
+for(i in c(2001:2005)) {
+  filename <- paste0(i, ".csv.bz2")
+  print(paste("Processing:", filename))
+  ontime <- read.csv(filename, header = TRUE)
+  if(i == 2000) {
+    dbWriteTable(conn, "ontime", ontime)
+  } else {
+    dbWriteTable(conn, "ontime", ontime, append = TRUE)
+  }
+}
+```
+
+
+```{r}
+conn <- dbConnect(RSQLite::SQLite(), "airline.db")
+dbListTables(conn)
+```
+
+##2a)What are the best times and days of the week to minimise delays each year?
+
+```{r}
+query <- dbGetQuery(conn,
+                  "SELECT Year, Month, DayofMonth AS Days,CRSDepTime AS DepartureTime, 
+                  DepDelay AS DepartureDelay
+                  FROM ontime
+                  WHERE Cancelled=0 AND Diverted=0")
+
+# We need to consider -ve departure delays to be early departure which is no delays at all for a ratio check
+delayed_flight_ratio <- query %>%
+  mutate(DepartureDelay = ifelse(DepartureDelay < 0, 0, DepartureDelay)) %>%
+  group_by(Year) %>%
+  summarise(
+    TotalFlights = n(),  
+    DelayedFlights = sum(DepartureDelay > 0),  
+    DelayRatio = DelayedFlights / TotalFlights
+  ) %>%
+  arrange(Year)
+delayed_flight_ratio
+
+
+```
+
+
+```{r}
+time_intervals <-function(query, interval=1){
+  if(!interval %in% c(1,3)){
+    stop("Please choose either 1 or 3 for intervals in hours or add another interval")
+  }
+  hr_breaks<- seq(0,24,by=interval)
+  labs<- head(paste0(format(hr_breaks, width = 2, justify = "right"), ":00-", format(hr_breaks + (interval - 1), width = 2, justify = "right"), ":59"), -1)
+  
+  query <- query %>%
+  mutate(
+    hour = floor(DepartureTime / 100),
+    minute = DepartureTime %% 100,
+    time_act = as.POSIXct(
+      paste(Year, Month, Days, hour, minute, 0, sep = "-"),
+      format = "%Y-%m-%d-%H-%M-%S"
+    ),
+    timeframe = cut(hour, breaks = hr_breaks, labels = labs, include.lowest = TRUE, right = FALSE))%>%
+    select(-hour,-minute)
+  
+  return(query)
+}
+```
+
+
+```{r}
+onehrtime<- time_intervals(query,interval = 1)
+head(onehrtime)
+
+```
+
+
+```{r}
+ontime_delay <- function(onehrtime){
+  onehrtime %>%
+    mutate(OnTime = ifelse(DepartureDelay >= -15 & DepartureDelay <= 15, 1, 0)) %>%
+    group_by(Year, timeframe) %>%
+    summarise(OnTimeRate = mean(OnTime, na.rm=TRUE)) %>%
+    arrange(Year, OnTimeRate)
+}
+
+ontime_data <- ontime_delay(onehrtime)
+
+yearly_data <- ontime_data %>%
+  filter(Year %in% 2001:2005) %>%
+  group_by(Year) %>%
+  mutate(is_max = OnTimeRate == max(OnTimeRate),
+         Year = factor(Year))
+```
+
+
+```{r}
+#Plotting for all years average delay by time block
+Ontime_plot <- function(select_year){
+  yearly_data %>%
+    filter(Year == select_year) %>%
+    ggplot(aes(x = timeframe, y = OnTimeRate, fill = is_max)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "green"), 
+                      name = "On-Time Status",
+                      labels = c("TRUE" = "Most On-Time", "FALSE" = "Normal")) +
+    labs(title = paste("On-Time Rate in 1-hour timeframe for", select_year),
+         x = "Time Interval",
+         y = "On-Time Rate") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10), 
+          legend.position = "top")
+}
+```
+
+
+```{r}
+Ontime_plot(2001)
+```
+
+
+```{r}
+Ontime_plot(2002)
+```
+
+
+```{r}
+Ontime_plot(2003)
+```
+
+
+```{r}
+Ontime_plot(2004)
+```
+
+
+```{r}
+Ontime_plot(2005)
+```
+
+```{r}
+q_BD <- dbGetQuery(conn,
+  "SELECT Year, DayOfWeek AS Day, DepDelay AS DepartureDelays
+   FROM ontime
+   WHERE Cancelled = 0 AND Diverted=0
+   ORDER BY Year"
+)
+
+# Convert Day to a factor with appropriate labels and Year to numeric
+q_BD$DayofWeek <- factor(q_BD$Day,
+                         levels = 1:7,
+                         labels = c("Monday", "Tuesday", "Wednesday", 
+                                    "Thursday", "Friday", "Saturday", "Sunday"))
+q_BD$Year <- as.numeric(q_BD$Year)
+
+# --- Compute Mean Departure Delay ---
+# If possible, remove GROUP BY in SQL so that you have one row per flight
+q_BD <- q_BD %>%
+  group_by(Year, DayofWeek) %>%
+  summarise(AverageDepDelay = mean(DepartureDelays, na.rm = TRUE)) %>%
+  ungroup() %>%
+  # Now group by Year to flag the day with the delay closest to zero in each year
+  group_by(Year) %>%
+  mutate(minday = AverageDepDelay == min(AverageDepDelay)) %>%
+  ungroup() %>%
+  arrange(Year, AverageDepDelay)
+
+# --- Filter for Years 2001 to 2005 ---
+Delay_day <- q_BD %>%
+  filter(Year %in% 2001:2005) %>%
+  mutate(Year = factor(Year))
+
+# --- Plotting Function ---
+Day_plot <- function(selected_year) {
+  Delay_day %>%
+    filter(Year == selected_year) %>%
+    ggplot(aes(x = DayofWeek, y = AverageDepDelay, fill = minday)) +
+    geom_hline(yintercept = 0, color = "black", linetype = "dashed", size = 1.2) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "green"), 
+                      name = "Delay Status", 
+                      labels = c("TRUE" = "Best Day", "FALSE" = "Other Days")) +
+    labs(title = paste("Average Departure Delay for", selected_year),
+         x = "Days of the Week",
+         y = "Average Departure Delay") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10), 
+          legend.position = "top")
+}
+
+
+
+```
+
+
+
+
+
+```{r}
+Day_plot(2001)
+```
+
+
+```{r}
+Day_plot(2002)
+```
+
+
+```{r}
+Day_plot(2003)
+```
+
+
+```{r}
+Day_plot(2004)
+```
+
+
+```{r}
+Day_plot(2005)
+```
+
+## 2b) In the case of whether older planes suffer more delays on a year-to-year basis
+
+
+```{r}
+# Evaluate whether older planes suffer more delays on a year-to-year basis.
+q3 <- dbGetQuery(conn,
+                 "SELECT ontime.Year AS Year, planes.model AS PlaneModels, 
+                 ontime.DepDelay AS DepDelay, planes.year AS PlaneIssuedYear
+                 FROM ontime
+                 JOIN planes ON ontime.tailnum = planes.tailnum
+                 WHERE ontime.Cancelled = 0 AND ontime.Diverted = 0")
+
+# Data Cleaning
+tab <- q3 %>%
+  filter(PlaneModels != "", PlaneIssuedYear != "", 
+         PlaneModels != "None", PlaneIssuedYear != "None",
+         PlaneModels != "0000", PlaneIssuedYear != "0000") %>%
+  drop_na() %>%
+  mutate(PlaneIssuedYear = as.integer(PlaneIssuedYear),
+         PlaneAge = Year - PlaneIssuedYear) %>%
+  filter(PlaneAge >= 0)
+
+# Summarizing Data
+tab_summary <- tab %>%
+  group_by(Year, PlaneAge) %>%
+  summarise(TotalDelays = sum(DepDelay, na.rm = TRUE),
+            FlightCount = n(),
+            AveDelays = TotalDelays/ FlightCount)
+
+```
+
+
+
+```{r}
+unique_years <- unique(tab_summary$Year)
+cor_list<- list()
+
+for(ye in unique_years){
+  yr_data <- tab_summary%>%filter(Year == ye)
+  
+  pearson <- cor.test(yr_data$AveDelays, yr_data$PlaneAge, method = "pearson")
+  spearman <- cor.test(yr_data$AveDelays, yr_data$PlaneAge, method = "spearman")
+  kendall <- cor.test(yr_data$AveDelays, yr_data$PlaneAge, method = "kendall")
+  
+  cor_results<- data.frame(
+    FlightYear=ye,
+    Pearson_cor=pearson$estimate,
+    Pearson_pval=pearson$p.value,
+    Spearman_cor=spearman$estimate,
+    Spearman_pval=spearman$p.value,
+    Kendall_cor=kendall$estimate,
+    Kendall_pval=kendall$p.value)
+  
+  
+  cor_list[[as.character(ye)]]<- cor_results
+}
+final_results<- bind_rows(cor_list)%>%
+  arrange(FlightYear)
+final_results
+```
+
+
+```{r}
+final_results_significance <- final_results %>%
+  mutate(
+    Pearson_Significant = ifelse(Pearson_pval < 0.05, TRUE, FALSE),
+    Spearman_Significant = ifelse(Spearman_pval < 0.05, TRUE, FALSE),
+    Kendall_Significant = ifelse(Kendall_pval < 0.05, TRUE, FALSE)
+  )%>% select(-Pearson_pval,-Spearman_pval,-Kendall_pval)
+
+
+final_results_significance
+```
+
+
+```{r}
+unique_years <- sort(unique(tab_summary$Year))  # ensure years are sorted
+for (yr in unique_years) {
+  # 1. Filter data for the current year
+  yr_data <- tab_summary[tab_summary$Year == yr, ]
+  
+  # 2. Fit the three models on this year's data
+  linear_model <- lm(AveDelays ~ PlaneAge, data = yr_data)
+  log_model    <- lm(AveDelays ~ log(PlaneAge + 1), data = yr_data)
+  exp_model    <- lm(log(AveDelays + 1) ~ PlaneAge, data = yr_data)
+  
+  # 3. Create a smooth sequence of PlaneAge values for predictions (cover the range of PlaneAge in this year)
+  age_min <- min(yr_data$PlaneAge, na.rm = TRUE)
+  age_max <- max(yr_data$PlaneAge, na.rm = TRUE)
+  age_seq <- seq(age_min, age_max, length.out = 100)  # 100 points for smooth curve
+  
+  # 4. Generate predicted values for each model over the age sequence
+  # Prepare newdata data frames for models (PlaneAge is the predictor in all model formulas)
+  newdata_df <- data.frame(PlaneAge = age_seq)
+  
+  # Predict AveDelays for linear and log models (no back-transformation needed)
+  pred_linear <- predict(linear_model, newdata = newdata_df)
+  pred_log    <- predict(log_model,    newdata = newdata_df)
+  
+  # Predict for exponential model (on log scale, then back-transform to original scale)
+  pred_logY   <- predict(exp_model, newdata = newdata_df)      # predicts log(AveDelays + 1)
+  pred_exp    <- exp(pred_logY) - 1                            # back-transform to AveDelays
+  
+  # Combine predictions into one data frame for plotting with a color legend
+  plot_preds <- data.frame(
+    PlaneAge = rep(age_seq, times = 3),
+    AveDelays = c(pred_linear, pred_log, pred_exp),
+    Model = factor(rep(c("Linear", "Log", "Exp"), each = length(age_seq)))
+  )
+  
+  # 5. Plot the data and fitted lines
+  p <- ggplot(yr_data, aes(x = PlaneAge, y = AveDelays)) +
+    geom_point(color = "blue", size = 2) +  # original data points
+    
+    # add fitted lines for each model, with color mapped to Model for legend
+    geom_line(data = plot_preds, aes(x = PlaneAge, y = AveDelays, color = Model), size = 1) +
+    scale_color_manual(name = "Model", 
+                       values = c("Linear" = "red", "Log" = "green", "Exp" = "purple")) +
+    
+    # Add titles and labels (modify as needed to match original intent)
+    labs(title    = paste("Year", yr, "- Average Delays vs. Plane Age"),
+         x        = "Plane Age",
+         y        = "Average Delays",
+         caption  = "Red=Linear fit, Green=Log fit, Purple=Exp fit") +
+    theme_minimal()
+  
+  print(p)  # display the plot for this year
+}
+
+```
+
+
+```{r}
+library(mlr3verse)
+library(mlr3tuning)
+library(caret)
+library(data.table)
+library(ROSE)
+library(paradox)
+```
+##2c) Fitting a logistic regression model for Diverted US flights
+
+```{r}
+#Prepare the data by joining
+#ontime and airports table
+
+flights<- dbGetQuery(conn,"SELECT ontime.Year AS Year, ontime.Month,ontime.DayofMonth,
+ontime.CRSDepTime,ontime.CRSArrTime, airports.lat AS Latitude, airports.long AS Longitude, ontime.Diverted AS Diverted, ontime.Distance AS Distance, ontime.UniqueCarrier AS carrier
+FROM ontime
+INNER JOIN planes ON ontime.TailNum = planes.tailnum
+INNER JOIN airports ON ontime.Origin = airports.iata
+INNER JOIN carriers ON ontime.UniqueCarrier = carriers.Code
+WHERE ontime.Cancelled=0")
+```
+
+
+
+```{r}
+#Check for ratios of Diverted flights to see if its evenly distributed if not we need to adjust distributions
+Diverted_ratio<- flights %>%
+  group_by(Year)%>%
+  summarise(total_flights=n(),
+            diverted_flights=sum(Diverted==1),
+            diverted_ratio=diverted_flights/total_flights)
+print(Diverted_ratio)
+```
+
+
+```{r}
+flights$Seasons<- cut(flights$Month,
+                      breaks=c(0,2,5,8,11,12),
+                      labels=c("Winter","Spring","Summer","Fall","Winter"),
+                      levels=c("Winter","Spring","Summer","Fall"))
+
+flights$Period<- cut(flights$DayofMonth,
+                     breaks=c(0,10,20,31),
+                     labels=c("Early","Mid","Late"),
+                     include.lowest=TRUE)
+```
+
+
+```{r}
+flights_model <- flights %>%
+  mutate(
+    Year = as.factor(Year),
+    Seasons = as.factor(Seasons),
+    Period= as.factor(Period),
+    HourDep = floor(CRSDepTime / 100),   
+    HourArr = floor(CRSArrTime / 100),
+    # Convert to radians (0 to 2π)
+    HourDep_rad = (2 * pi * HourDep) / 24,
+    HourArr_rad = (2 * pi * HourArr) / 24,
+    
+    # Sine and Cosine Transformations to simulate a clock
+    HourDep_sin = sin(HourDep_rad),
+    HourDep_cos = cos(HourDep_rad),
+    HourArr_sin = sin(HourArr_rad),
+    HourArr_cos = cos(HourArr_rad),
+    Distance = as.numeric(Distance),
+    Latitude = as.numeric(Latitude),
+    Longitude = as.numeric(Longitude),
+    Diverted = factor(Diverted,levels = c(1,0)),
+    Carriers = as.factor(carrier)
+  ) %>%
+  select(Year, Seasons, Period, 
+    HourDep_sin, HourDep_cos, 
+    HourArr_sin, HourArr_cos, 
+    Carriers, Latitude, Longitude, Distance, Diverted)%>%
+  drop_na()
+cor(flights_model$HourDep_sin, flights_model$HourArr_sin)
+cor(flights_model$HourDep_cos, flights_model$HourArr_cos)
+```
+
+
+```{r}
+flights_model <- flights_model %>%
+  select(-HourArr_sin,-HourArr_cos)
+str(flights_model)
+```
+
+##Logistic Regression
+
+```{r}
+Run_Logistic_Regr <- function(yr) {
+  flights_year <- as.data.table(flights_model)[Year == yr]
+
+  set.seed(1234)
+  n <- nrow(flights_year)
+  train_set <- sample(n, round(0.8 * n))
+  test_set  <- setdiff(seq_len(n), train_set)
+
+  task <- TaskClassif$new("Divertedflightsprob", backend = flights_year, target = "Diverted")
+  task$select(c("Seasons", "Period", "HourDep_sin", "HourDep_cos", 
+                "Latitude", "Longitude", "Distance"))
+
+  measures <- msrs(c("classif.ce", "classif.auc", "classif.precision", "classif.recall", "classif.fbeta"))
+
+  learner <- lrn("classif.log_reg", predict_type = "prob", maxit = 1000)
+
+  gc_lr <- po("imputemean", affect_columns = selector_type("numeric")) %>>%
+    po("imputemode", affect_columns = selector_type("factor")) %>>%
+    po("scale", affect_columns = selector_type("numeric")) %>>%
+    po("encode", method = "one-hot", affect_columns = selector_type("factor")) %>>% 
+    po("smote", param_vals = list(K = 1, dup_size = 10)) %>>%
+    po("classbalancing", id = "undersample", adjust = "major", ratio = 0.3) %>>%
+    po(learner)
+
+  glrn_lr <- GraphLearner$new(gc_lr, id = paste0("LogReg_", yr))
+
+  glrn_lr$train(task, row_ids = train_set)
+  predictions <- glrn_lr$predict(task, row_ids = test_set)
+  predictions$set_threshold(0.3)
+  performance <- predictions$score(measures)
+
+  conf_matrix <- as.data.table(predictions$confusion)
+  conf_matrix[, year := yr]
+
+  best_model_coeffs <- glrn_lr$model$classif.log_reg$model$coefficients
+  coef_table <- data.table(
+    feature = names(best_model_coeffs),
+    coefficient = as.numeric(best_model_coeffs),
+    year = yr
+  )
+
+  return(list(coefficients = coef_table, 
+              performance = performance,
+              confusion = conf_matrix))
+}
+
+
+```
+
+
+
+```{r}
+res1<-Run_Logistic_Regr(2001)
+res2<-Run_Logistic_Regr(2002)
+res3<-Run_Logistic_Regr(2003)
+res4<-Run_Logistic_Regr(2004)
+res5<-Run_Logistic_Regr(2005)
+
+```
+
+
+###Coefficients extraction
+
+```{r}
+all_coefficients <- rbindlist(
+  list(
+    res1$coefficients, res2$coefficients, res3$coefficients,
+    res4$coefficients, res5$coefficients))
+
+
+all_performance <- rbindlist(
+  list(
+    as.list(res1$performance),as.list(res2$performance),as.list(res3$performance),
+    as.list(res4$performance),as.list(res5$performance)),
+  idcol = "year"
+)
+all_performance[, year := 2000 + year]
+
+all_confusion <- rbindlist(list(
+  res1$confusion, res2$confusion,
+  res3$confusion, res4$confusion, res5$confusion
+))
+```
+
+```{r}
+#Prevent dummy variable from showing
+all_coefficients<- all_coefficients%>%
+  drop_na()
+
+all_coefficients
+```
+
+```{r}
+all_performance
+```
+
+
+```{r}
+all_confusion
+```
+
+
+```{r}
+
+all_coefficients$year <- as.factor(all_coefficients$year)
+all_coefficients<- filter(all_coefficients, feature != "(Intercept)")
+
+ggplot(all_coefficients, aes(x = feature, y = coefficient, fill = year)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Logistic Regression Classification Feature Coefficients Across Years",
+       x = "Feature", y = "Coefficient Value", fill="Year") +
+  theme(legend.position = "top",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+ggplot(all_confusion, aes(x = response, y = truth, fill = N)) +
+  geom_tile() +
+  geom_text(aes(label = N), color = "white") +
+  scale_fill_viridis_c() +
+  facet_wrap(~year, nrow = 2) +
+  labs(title = "Confusion Matrices Across Years",
+       x = "Predicted", y = "Actual") +
+  scale_x_discrete(labels = c("Not Diverted", "Diverted")) + 
+  scale_y_discrete(labels = c("Not Diverted", "Diverted")) +
+  theme_minimal()
+```
+
+
+```{r}
+
+
+```
+
+
+
+```{r}
+dbDisconnect(conn)
+
+```
+
+
+```{r}
+
+
+```
+
+
+```{r}
+```
+
+```{r}
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+```
+
